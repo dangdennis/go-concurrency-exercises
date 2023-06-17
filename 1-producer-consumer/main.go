@@ -11,21 +11,24 @@ package main
 import (
 	"fmt"
 	"time"
+
+	"github.com/dangdennis/go-concurrency-exercises/1-producer-consumer/mockstream"
 )
 
-func producer(stream Stream) (tweets []*Tweet) {
+func producer(stream mockstream.Stream, tweetCh chan *mockstream.Tweet, doneCh chan bool) {
 	for {
 		tweet, err := stream.Next()
-		if err == ErrEOF {
-			return tweets
+		if err == mockstream.ErrEOF {
+			doneCh <- true
+			return
 		}
 
-		tweets = append(tweets, tweet)
+		tweetCh <- tweet
 	}
 }
 
-func consumer(tweets []*Tweet) {
-	for _, t := range tweets {
+func consumer(tweetCh chan *mockstream.Tweet) {
+	for t := range tweetCh {
 		if t.IsTalkingAboutGo() {
 			fmt.Println(t.Username, "\ttweets about golang")
 		} else {
@@ -36,13 +39,22 @@ func consumer(tweets []*Tweet) {
 
 func main() {
 	start := time.Now()
-	stream := GetMockStream()
+	stream := mockstream.GetMockStream()
+
+	tweetsChan := make(chan *mockstream.Tweet)
+	doneChan := make(chan bool)
 
 	// Producer
-	tweets := producer(stream)
+	go producer(stream, tweetsChan, doneChan)
 
 	// Consumer
-	consumer(tweets)
+	go consumer(tweetsChan)
+
+	// Ensures producer stops before consumer stops
+	<-doneChan
+
+	// Close channel to wait for consumer to finish
+	close(tweetsChan)
 
 	fmt.Printf("Process took %s\n", time.Since(start))
 }
