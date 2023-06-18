@@ -1,21 +1,16 @@
-//////////////////////////////////////////////////////////////////////
-//
-// Given is some code to cache key-value pairs from a database into
-// the main memory (to reduce access time). Note that golang's map are
-// not entirely thread safe. Multiple readers are fine, but multiple
-// writers are not. Change the code to make this thread safe.
-//
-
 package main
 
-import "container/list"
+import (
+	"container/list"
+	"sync"
+)
 
 // CacheSize determines how big the cache can grow
 const CacheSize = 100
 
 // KeyStoreCacheLoader is an interface for the KeyStoreCache
 type KeyStoreCacheLoader interface {
-	// Load implements a function where the cache should gets it's content from
+	// Load implements a function where the cache should get its content from
 	Load(string) string
 }
 
@@ -26,6 +21,7 @@ type page struct {
 
 // KeyStoreCache is a LRU cache for string key-value pairs
 type KeyStoreCache struct {
+	lock  sync.RWMutex // Use RWMutex for thread safety
 	cache map[string]*list.Element
 	pages list.List
 	load  func(string) string
@@ -41,13 +37,32 @@ func New(load KeyStoreCacheLoader) *KeyStoreCache {
 
 // Get gets the key from cache, loads it from the source if needed
 func (k *KeyStoreCache) Get(key string) string {
+	k.lock.RLock() // Acquire a read lock
+	if e, ok := k.cache[key]; ok {
+		// We've already read from the cache, release the read lock.
+		// We'll now be able to acquire a write lock and move the element to the front of the list
+		k.lock.RUnlock()
+		k.lock.Lock()
+		k.pages.MoveToFront(e)
+		value := e.Value.(page).Value
+		k.lock.Unlock()
+		return value
+	}
+	k.lock.RUnlock() // Release the read lock
+
+	k.lock.Lock() // Acquire a write lock
+
+	// Check again in case the value was loaded by another writer while waiting for the lock
 	if e, ok := k.cache[key]; ok {
 		k.pages.MoveToFront(e)
-		return e.Value.(page).Value
+		value := e.Value.(page).Value
+		k.lock.Unlock() // Release the write lock
+		return value
 	}
+
 	// Miss - load from database and save it in cache
 	p := page{key, k.load(key)}
-	// if cache is full remove the least used item
+	// if cache is full, remove the least used item
 	if len(k.cache) >= CacheSize {
 		end := k.pages.Back()
 		// remove from map
@@ -57,10 +72,14 @@ func (k *KeyStoreCache) Get(key string) string {
 	}
 	k.pages.PushFront(p)
 	k.cache[key] = k.pages.Front()
-	return p.Value
+	value := p.Value
+
+	k.lock.Unlock() // Release the write lock
+
+	return value
 }
 
-// Loader implements KeyStoreLoader
+// Loader implements KeyStoreCacheLoader
 type Loader struct {
 	DB *MockDB
 }
