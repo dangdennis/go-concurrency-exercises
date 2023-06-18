@@ -10,6 +10,8 @@
 
 package main
 
+import "time"
+
 // User defines the UserModel. Use this to check whether a User is a
 // Premium user or not
 type User struct {
@@ -18,11 +20,36 @@ type User struct {
 	TimeUsed  int64 // in seconds
 }
 
+// Dude. It's impossible to cancel the process if process arg doesn't change.
+// We can use a cancellation context but our process fn doesn't accept one.
+// So for now, we'll just let the process fn run and
+
 // HandleRequest runs the processes requested by users. Returns false
 // if process had to be killed
 func HandleRequest(process func(), u *User) bool {
-	process()
-	return true
+	if !u.IsPremium && u.TimeUsed >= 10 {
+		return false
+	}
+
+	quit := make(chan bool, 1)
+	processTime := int64(0)
+
+	go func() {
+		startTime := time.Now()
+		process()
+		elapsedTime := time.Since(startTime)
+		processTime = int64(elapsedTime.Seconds())
+		quit <- true
+	}()
+
+	select {
+	case <-quit:
+		u.TimeUsed += processTime
+		return true
+	case <-time.After(time.Second * 10):
+		u.TimeUsed += 10
+		return false
+	}
 }
 
 func main() {
