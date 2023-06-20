@@ -19,25 +19,36 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"log"
+	"sync"
+	"time"
 )
 
 // SessionManager keeps track of all sessions from creation, updating
 // to destroying.
 type SessionManager struct {
-	sessions map[string]Session
+	sessions       map[string]Session
+	sessionCleaner *sessionCleaner
+	mutex          sync.RWMutex
 }
 
 // Session stores the session's data
 type Session struct {
-	Data map[string]interface{}
+	Data      map[string]interface{}
+	UpdatedAt time.Time
 }
 
 // NewSessionManager creates a new sessionManager
 func NewSessionManager() *SessionManager {
 	m := &SessionManager{
+		sessionCleaner: &sessionCleaner{
+			stopChan: make(chan struct{}),
+		},
 		sessions: make(map[string]Session),
 	}
+
+	go m.sessionCleaner.start(m)
 
 	return m
 }
@@ -49,8 +60,11 @@ func (m *SessionManager) CreateSession() (string, error) {
 		return "", err
 	}
 
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
 	m.sessions[sessionID] = Session{
-		Data: make(map[string]interface{}),
+		Data:      make(map[string]interface{}),
+		UpdatedAt: time.Now(),
 	}
 
 	return sessionID, nil
@@ -63,6 +77,9 @@ var ErrSessionNotFound = errors.New("SessionID does not exists")
 // GetSessionData returns data related to session if sessionID is
 // found, errors otherwise
 func (m *SessionManager) GetSessionData(sessionID string) (map[string]interface{}, error) {
+	m.mutex.RLock()
+	defer m.mutex.RUnlock()
+
 	session, ok := m.sessions[sessionID]
 	if !ok {
 		return nil, ErrSessionNotFound
@@ -72,14 +89,19 @@ func (m *SessionManager) GetSessionData(sessionID string) (map[string]interface{
 
 // UpdateSessionData overwrites the old session data with the new one
 func (m *SessionManager) UpdateSessionData(sessionID string, data map[string]interface{}) error {
+	m.mutex.RLock()
 	_, ok := m.sessions[sessionID]
 	if !ok {
+		defer m.mutex.RUnlock()
 		return ErrSessionNotFound
 	}
+	m.mutex.RUnlock()
 
-	// Hint: you should renew expiry of the session here
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
 	m.sessions[sessionID] = Session{
-		Data: data,
+		Data:      data,
+		UpdatedAt: time.Now(),
 	}
 
 	return nil
@@ -113,4 +135,34 @@ func main() {
 	}
 
 	log.Println("Get session data:", updatedData)
+}
+
+// sessionCleaner periodically cleans sessions that haven't been updated for more than 5 seconds.
+type sessionCleaner struct {
+	stopChan chan struct{}
+}
+
+func (sc *sessionCleaner) start(m *SessionManager) {
+	ticker := time.NewTicker(1 * time.Second)
+	for {
+		select {
+		case <-ticker.C:
+			sc.clean(m)
+		case <-sc.stopChan:
+			ticker.Stop()
+			return
+		}
+	}
+}
+
+func (sc *sessionCleaner) clean(m *SessionManager) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	for k, v := range m.sessions {
+		if time.Now().Sub(v.UpdatedAt) > 5*time.Second {
+			delete(m.sessions, k)
+			fmt.Printf("session %s deleted\n", k)
+		}
+	}
 }
